@@ -1,0 +1,102 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with pgvector extension
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: compliance-db
+    environment:
+      POSTGRES_DB: compliance_db
+      POSTGRES_USER: compliance_user
+      POSTGRES_PASSWORD: compliance_pass
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U compliance_user -d compliance_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - compliance-network
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: compliance-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - compliance-network
+
+  # ChromaDB for vector storage
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: compliance-chromadb
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - CHROMA_SERVER_AUTH_CREDENTIALS_FILE=/chroma/auth.toml
+      - CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER=chromadb.auth.token.TokenAuthServerProvider
+      - CHROMA_SERVER_AUTH_PROVIDER=chromadb.auth.token.TokenAuthServerProvider
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8000/api/v1/heartbeat || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - compliance-network
+
+  # Compliance Agent API (for development)
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: compliance-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://compliance_user:compliance_pass@db:5432/compliance_db
+      - REDIS_URL=redis://redis:6379
+      - CHROMADB_HOST=chromadb
+      - CHROMADB_PORT=8000
+      - LOG_LEVEL=info
+      - PYTHONPATH=/app
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+      - ./docs:/app/docs
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+    networks:
+      - compliance-network
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  chroma_data:
+    driver: local
+
+networks:
+  compliance-network:
+    driver: bridge
